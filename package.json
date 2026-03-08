@@ -1,0 +1,22 @@
+{
+  "name": "jira-weekly-planner",
+  "version": "1.0.0",
+  "description": "Automatically fetch tasks from Jira, sort by priority, allocate 40h/week and send reports to Discord",
+  "main": "jira-weekly-planner.js",
+  "scripts": {
+    "start": "node jira-weekly-planner.js",
+    "test": "node jira-weekly-planner.js --dry-run"
+  },
+  "keywords": [
+    "jira",
+    "planner",
+    "discord",
+    "productivity"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.0"
+  }
+}

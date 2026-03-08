@@ -1,0 +1,173 @@
+const axios = require('axios');
+const config = require('./config');
+const { getWeekOfYear, truncateText, chunkTasks, groupTasksByTypeAndStatus } = require('./utils');
+
+function formatTaskItem(task, showHours = true, showNumber = false, number = 0) {
+  const priorityEmoji = {
+    'Highest': '⏫',
+    'High': '🔺',
+    'Medium': '➖',
+    'Low': '🔽',
+    'Lowest': '⏬',
+  }[task.priority] || '➖';
+
+  const partialTag = task.partial ? ' *(partial)*' : '';
+  const projectTag = task.project ? ` [${task.project}]` : '';
+  const summary = task.summary.length > 70 ? task.summary.substring(0, 67) + '...' : task.summary;
+  const prefix = showNumber ? `${number}. ` : '';
+  const hoursInfo = showHours ? ` ⏱️ ${task.estimatedHours}h${partialTag}` : '';
+  
+  return `${prefix}${priorityEmoji} **[${task.key}](${task.url})**${projectTag} - ${summary}${hoursInfo}`;
+}
+
+function createDiscordMessages(plannedTasks, overflowTasks, utilizedHours, totalAvailableHours, planningWeeks, planningType, planningCount, hoursPerUnit) {
+  const messages = [];
+  const effectiveTotalHours = totalAvailableHours || (hoursPerUnit * (planningCount || 1));
+  const utilizationPercent = Math.round((utilizedHours / effectiveTotalHours) * 100);
+  const planningMembers = Math.max(1, config.planning.members || 1);
+  const isBugMode = process.env.BUG_MODE === 'true';
+
+  const now = new Date();
+  const weekOfYear = getWeekOfYear(now);
+  const endWeekOfYear = planningWeeks > 1 ? weekOfYear + planningWeeks - 1 : weekOfYear;
+  const weekLabel = planningType === 'daily'
+    ? `Daily Plan - Week ${weekOfYear}`
+    : (planningWeeks > 1 ? `Weeks ${weekOfYear}-${endWeekOfYear}` : `Week ${weekOfYear}`);
+  const planningUnitLabel = planningType === 'daily' ? 'day' : 'week';
+  const currentDate = now.toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric'
+  });
+
+  const grouped = groupTasksByTypeAndStatus(plannedTasks);
+  
+  // Debug: Log issue types
+  if (process.env.DEBUG === 'true') {
+    const issueTypes = [...new Set(plannedTasks.map(t => t.issueType))];
+    console.log('📊 Issue types found:', issueTypes);
+    console.log('📊 Grouped counts:', {
+      taskStories: grouped.taskStories.total,
+      bugs: grouped.bugs.total,
+      subtasks: grouped.subtasks.total,
+    });
+  }
+  
+  // Bug mode: Không hiển thị Time Overview
+  const fields = [];
+  if (!isBugMode) {
+    fields.push({
+      name: '⏰ Time Overview',
+      value: `📊 **${utilizedHours}h / ${effectiveTotalHours}h** (${utilizationPercent}%)\n` +
+              `🗓️ Planning: ${planningCount} ${planningUnitLabel}(s) × ${hoursPerUnit}h × ${planningMembers} member(s)\n` +
+             `⏳ Backlog: ${overflowTasks.length} tasks`,
+      inline: false,
+    });
+  }
+
+  // Task/Story section (no hours)
+  if (grouped.taskStories.total > 0) {
+    let taskStoriesText = `**📋 Tasks & Stories** (${grouped.taskStories.total} total)\n\n`;
+    
+    Object.entries(grouped.taskStories.byStatus).forEach(([status, tasks]) => {
+      taskStoriesText += `**${status}** (${tasks.length}):\n`;
+      tasks.forEach(task => {
+        taskStoriesText += `• ${formatTaskItem(task, false)}\n`;
+      });
+      taskStoriesText += '\n';
+    });
+
+    fields.push({
+      name: '📝 Tasks & Stories',
+      value: truncateText(taskStoriesText.trim()),
+      inline: false,
+    });
+  }
+
+  // Bug section (with hours)
+  if (grouped.bugs.total > 0) {
+    let bugsText = `**🐛 Bugs** (${grouped.bugs.total} total)\n\n`;
+    
+    Object.entries(grouped.bugs.byStatus).forEach(([status, tasks]) => {
+      bugsText += `**${status}** (${tasks.length}):\n`;
+      tasks.forEach(task => {
+        bugsText += `• ${formatTaskItem(task, true)}\n`;
+      });
+      bugsText += '\n';
+    });
+
+    fields.push({
+      name: '🐞 Bugs',
+      value: truncateText(bugsText.trim()),
+      inline: false,
+    });
+  }
+
+  // Subtask section (with hours)
+  if (grouped.subtasks.total > 0) {
+    let subtasksText = `**🔧 Subtasks** (${grouped.subtasks.total} total)\n\n`;
+    
+    Object.entries(grouped.subtasks.byStatus).forEach(([status, tasks]) => {
+      subtasksText += `**${status}** (${tasks.length}):\n`;
+      tasks.forEach(task => {
+        subtasksText += `• ${formatTaskItem(task, true)}\n`;
+      });
+      subtasksText += '\n';
+    });
+
+    fields.push({
+      name: '🔨 Subtasks',
+      value: truncateText(subtasksText.trim()),
+      inline: false,
+    });
+  }
+
+  messages.push({
+    embeds: [{
+      title: isBugMode ? '🐛 Jira Bugs Report' : '📅 Jira Weekly Planner',
+      description: isBugMode 
+        ? `**All Bugs - ${currentDate}**`
+        : `**Weekly Work Plan - ${weekLabel} - ${currentDate}**`,
+      color: isBugMode ? 0xe74c3c : (utilizationPercent >= 90 ? 0x2ecc71 : utilizationPercent >= 70 ? 0xf39c12 : 0xe74c3c),
+      fields: fields,
+      footer: {
+        text: isBugMode 
+          ? `Generated by Jira Bug Reporter • ${plannedTasks.length} bugs`
+          : `Generated by Jira Weekly Planner • ${plannedTasks.length} tasks`,
+      },
+      timestamp: new Date().toISOString(),
+    }],
+  });
+
+  return messages;
+}
+
+async function sendToDiscord(messages) {
+  try {
+    console.log(`📤 Sending ${messages.length} report(s) to Discord...`);
+
+    if (process.env.DEBUG === 'true') {
+      console.log('Debug - Discord Messages:', JSON.stringify(messages, null, 2));
+    }
+
+    for (let i = 0; i < messages.length; i++) {
+      await axios.post(config.discord.webhookUrl, messages[i]);
+      console.log(`✅ Sent message ${i + 1}/${messages.length}`);
+
+      if (i < messages.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+
+    console.log('✅ Successfully sent all reports to Discord!');
+  } catch (error) {
+    console.error('❌ Error sending to Discord:', error.response?.data || error.message);
+    if (error.response?.data) {
+      console.error('Response data:', JSON.stringify(error.response.data, null, 2));
+    }
+    throw error;
+  }
+}
+
+module.exports = { createDiscordMessages, sendToDiscord };
